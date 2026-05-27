@@ -1,0 +1,54 @@
+# ─────────────────────────────────────────────────────────────────
+#  docker-compose.yml — Production Stack
+#
+#  Services:
+#  Trino  : Query engine — used for verification queries,
+#           expire_snapshots, remove_orphan_files
+#  Spark  : Compaction engine — used for rewrite_data_files
+#           (handles concurrent ingestion writes via partial progress)
+#
+#  Both connect to:
+#  Nessie : Your Nessie catalogue server (external, not in Docker)
+#  S3     : Your S3 bucket (via IAM role — no access keys needed)
+#
+#  WHY TWO ENGINES:
+#  Trino's OPTIMIZE command fails when the ingestion pipeline writes
+#  concurrently to the same Iceberg table. Spark's rewrite_data_files
+#  with partial-progress handles this better. Trino stays for all
+#  non-compaction operations.
+# ─────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── Trino — verification + expire + orphan removal ─────────────
+  trino:
+    image: trinodb/trino:480
+    container_name: trino
+    ports:
+      - "8080:8080"     # Trino UI  → http://<EC2-IP>:8080
+    volumes:
+      - ./trino/catalog:/etc/trino/catalog
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/v1/info"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  # ── Spark — rewrite_data_files compaction ──────────────────────
+  spark:
+    image: apache/spark:3.5.1-python3
+    container_name: spark
+    ports:
+      - "4040:4040"     # Spark UI → http://<EC2-IP>:4040
+    environment:
+      - AWS_DEFAULT_REGION=<your-aws-region>   # replace with real region
+    volumes:
+      - ./scripts:/opt/spark/work-dir/scripts  # mounts scripts into container
+      - ./spark-ivy-cache:/home/spark/.ivy2    # persists JAR cache across restarts
+    command: tail -f /dev/null                 # keeps container running
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 4g    # 4GB for Spark — leaves RAM for Trino on 8GB EC2
